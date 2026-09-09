@@ -1,0 +1,7 @@
+# Build artifacts
+*.o
+/gbcalc
+/tests/test_calc
+
+# Local Claude Code settings
+.claude/settings.local.json
