@@ -12,6 +12,7 @@ const I64_LIMIT: f64 = 9.223_372_036_854_776e18;
 
 const STACK_MAX: usize = 32;
 const ENTRY_MAX: usize = 72;
+const HISTORY_MAX: usize = 200;
 
 /// Number base for entry and display. Values are the radix itself.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -109,6 +110,9 @@ pub struct Calc {
     pub error: bool,
     pub errmsg: Option<&'static str>, // valid while error is set
 
+    /// Completed calculations, oldest first, as "expr = result" text.
+    pub history: Vec<String>,
+
     // Entry state machine bookkeeping.
     value_ready: bool, // an operand is available (digit, unary, ")")
     op_pending: bool,  // last keypress was a binary operator
@@ -201,6 +205,7 @@ impl Default for Calc {
             last_ans: 0.0,
             error: false,
             errmsg: None,
+            history: Vec::new(),
             value_ready: false,
             op_pending: false,
         }
@@ -690,6 +695,19 @@ impl Calc {
             return;
         }
 
+        // Snapshot the operator/operand stack for the history entry below.
+        // A dangling trailing operator (last keypress was "op", not a digit)
+        // is about to be dropped rather than applied -- exclude its frame so
+        // the logged expression matches what actually gets computed.
+        let dangling = self.op_pending
+            && self.stack.last().map(|f| f.op != Op::LParen).unwrap_or(false);
+        let mut frames = self.stack.clone();
+        if dangling {
+            frames.pop();
+        }
+        let open_parens = self.paren_depth;
+        let last_operand = self.current();
+
         let mut v = if self.op_pending
             && self
                 .stack
@@ -720,6 +738,45 @@ impl Calc {
         self.entry.clear();
         self.op_pending = false;
         self.value_ready = false; // a following "(" starts a new expression
+
+        // A bare "=" that changed nothing (no operator was ever applied)
+        // isn't worth a history entry.
+        if !frames.is_empty() || last_operand != v {
+            self.record_history(&frames, open_parens, last_operand, v);
+        }
+    }
+
+    /// Append an "expr = result" line to `history`, formatted in the base
+    /// active at the time of the calculation.
+    fn record_history(&mut self, frames: &[Frame], open_parens: i32, last: f64, result: f64) {
+        let mut expr = String::new();
+        for f in frames {
+            if f.op == Op::LParen {
+                if !expr.is_empty() && !expr.ends_with(' ') {
+                    expr.push(' ');
+                }
+                expr.push('(');
+                continue;
+            }
+            if !expr.is_empty() && !expr.ends_with('(') {
+                expr.push(' ');
+            }
+            expr.push_str(&render_value(f.value, self.base));
+            expr.push(' ');
+            expr.push_str(Self::op_symbol(f.op));
+        }
+        if !expr.is_empty() && !expr.ends_with('(') {
+            expr.push(' ');
+        }
+        expr.push_str(&render_value(last, self.base));
+        for _ in 0..open_parens.max(0) {
+            expr.push(')');
+        }
+
+        self.history.push(format!("{expr} = {}", render_value(result, self.base)));
+        if self.history.len() > HISTORY_MAX {
+            self.history.remove(0);
+        }
     }
 
     // ------------------------------------------------------------ unary --
@@ -953,17 +1010,7 @@ impl Calc {
 
     /// Value rendered in a specific base; `"-"` when not representable.
     pub fn render_base(&self, b: Base) -> String {
-        let v = self.current();
-
-        if b == Base::Dec {
-            return fmt_dec(v);
-        }
-        // Hex and binary show the 64-bit two's-complement pattern.
-        let v = snap_display(v);
-        if !v.is_finite() || v != v.trunc() || v.abs() >= I64_LIMIT {
-            return "-".to_string();
-        }
-        fmt_ubase(v as i64 as u64, b.radix() as u32, if b == Base::Hex { 4 } else { 8 })
+        render_value(self.current(), b)
     }
 
     /// Main display text (error message, entry as typed, or formatted value).
@@ -1107,6 +1154,19 @@ fn fmt_ubase(mut u: u64, base: u32, grp: usize) -> String {
         }
     }
     out
+}
+
+/// Render `v` in base `b`; `"-"` when not representable (see `render_base`).
+fn render_value(v: f64, b: Base) -> String {
+    if b == Base::Dec {
+        return fmt_dec(v);
+    }
+    // Hex and binary show the 64-bit two's-complement pattern.
+    let v = snap_display(v);
+    if !v.is_finite() || v != v.trunc() || v.abs() >= I64_LIMIT {
+        return "-".to_string();
+    }
+    fmt_ubase(v as i64 as u64, b.radix() as u32, if b == Base::Hex { 4 } else { 8 })
 }
 
 fn fmt_dec(v: f64) -> String {
@@ -1564,5 +1624,59 @@ mod tests {
         type_str(&mut c, "100");
         c.equals();
         assert_eq!(c.display(), "1.26765060023e+30");
+    }
+
+    #[test]
+    fn history() {
+        // A bare "=" with no operator applied logs nothing.
+        let mut c = Calc::new();
+        type_str(&mut c, "42");
+        c.equals();
+        assert!(c.history.is_empty());
+        c.equals(); // repeat presses stay silent too
+        assert!(c.history.is_empty());
+
+        // Precedence is reflected in the logged expression, not just typed order.
+        let mut c = Calc::new();
+        type_str(&mut c, "2");
+        c.op(Op::Add);
+        type_str(&mut c, "3");
+        c.op(Op::Mul);
+        type_str(&mut c, "4");
+        c.equals();
+        assert_eq!(c.history, vec!["2 + 3 * 4 = 14"]);
+
+        // Parentheses are reconstructed around the grouped operands.
+        let mut c = Calc::new();
+        type_str(&mut c, "1");
+        c.op(Op::Add);
+        c.lparen();
+        type_str(&mut c, "2");
+        c.op(Op::Mul);
+        type_str(&mut c, "3");
+        c.equals();
+        assert_eq!(c.history, vec!["1 + (2 * 3) = 7"]);
+
+        // A dangling trailing operator ("2 + 3 *" then "=") is dropped, and
+        // the logged expression matches what actually got computed (2 + 3).
+        let mut c = Calc::new();
+        type_str(&mut c, "2");
+        c.op(Op::Add);
+        type_str(&mut c, "3");
+        c.op(Op::Mul);
+        c.equals();
+        assert_eq!(c.history, vec!["2 + 3 = 5"]);
+
+        // Multiple equals presses append, oldest first.
+        let mut c = Calc::new();
+        type_str(&mut c, "1");
+        c.op(Op::Add);
+        type_str(&mut c, "1");
+        c.equals();
+        type_str(&mut c, "5");
+        c.op(Op::Mul);
+        type_str(&mut c, "5");
+        c.equals();
+        assert_eq!(c.history, vec!["1 + 1 = 2", "5 * 5 = 25"]);
     }
 }

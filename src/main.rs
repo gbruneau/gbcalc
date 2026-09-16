@@ -6,7 +6,7 @@ mod ui;
 
 use theme::ColorMode;
 
-const GBCALC_VERSION: &str = "1.0.0";
+pub const GBCALC_VERSION: &str = "1.0.0";
 
 fn usage(to_stderr: bool) {
     const TEXT: &str = "\

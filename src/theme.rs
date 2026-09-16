@@ -836,16 +836,22 @@ fn theme_dirs() -> Vec<String> {
     dirs
 }
 
-fn user_theme_conf_path() -> Option<String> {
+/// The user's gbcalc config directory, `$XDG_CONFIG_HOME/gbcalc` or
+/// `$HOME/.config/gbcalc`. Used for the theme config and the saved history.
+pub fn config_dir() -> Option<String> {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME")
         && !xdg.is_empty() {
-            return Some(format!("{xdg}/gbcalc/theme.conf"));
+            return Some(format!("{xdg}/gbcalc"));
         }
     if let Ok(home) = std::env::var("HOME")
         && !home.is_empty() {
-            return Some(format!("{home}/.config/gbcalc/theme.conf"));
+            return Some(format!("{home}/.config/gbcalc"));
         }
     None
+}
+
+fn user_theme_conf_path() -> Option<String> {
+    config_dir().map(|d| format!("{d}/theme.conf"))
 }
 
 pub fn detect_color_mode() -> ColorMode {

@@ -405,6 +405,15 @@ struct Rect {
     w: i32,
 }
 
+/// Full-screen overlays that replace the keypad while shown.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Overlay {
+    None,
+    Help,
+    About,
+    History,
+}
+
 struct Ui {
     cols: i32,
     lines: i32,
@@ -413,7 +422,8 @@ struct Ui {
     rect: [[Rect; MAX_COLS]; NROWS],
     fr: usize,
     fc: usize,
-    help: bool,
+    overlay: Overlay,
+    hist_msg: Option<String>, // status line shown under the history overlay
     out: String,
     input: Input,
 }
@@ -428,7 +438,8 @@ impl Ui {
             rect: [[Rect::default(); MAX_COLS]; NROWS],
             fr: NROWS - 1,
             fc: 3, // start focus on "=" so Enter evaluates straight away
-            help: false,
+            overlay: Overlay::None,
+            hist_msg: None,
             out: String::new(),
             input: Input::new(),
         }
@@ -748,6 +759,35 @@ impl Ui {
         self.style_off();
     }
 
+    /// One line of a full-screen overlay: `id` styles everything but the
+    /// title, which always uses `StyleId::HelpTitle`.
+    fn draw_overlay_line(&mut self, theme: &Theme, y: i32, x: i32, text: &str, i: usize) {
+        self.at(y, x);
+        self.style(
+            theme,
+            if i == 0 { StyleId::HelpTitle } else { StyleId::HelpText },
+            StyleState::Normal,
+        );
+        self.os(text);
+        self.style_off();
+    }
+
+    /// Lay out and draw `lines` as a centred full-screen overlay; returns
+    /// `(top, left, n)` so callers can place extra content below it.
+    fn draw_overlay(&mut self, theme: &Theme, lines: &[&str]) -> (i32, i32, i32) {
+        let n = lines.len() as i32;
+        let top = ((self.lines - n - 2) / 2 + 1).max(1);
+        let left = ((self.cols - 70) / 2 + 1).max(1);
+
+        for (i, line) in lines.iter().enumerate() {
+            if top + i as i32 > self.lines {
+                break;
+            }
+            self.draw_overlay_line(theme, top + i as i32, left, line, i);
+        }
+        (top, left, n)
+    }
+
     fn draw_help(&mut self, theme: &Theme) {
         const LINES: &[&str] = &[
             "gbcalc key bindings",
@@ -768,35 +808,69 @@ impl Ui {
             "  \\              MOD",
             "",
             "  m n M X K A    STO RCL M+ MX MC ANS",
+            "  I              about gbcalc",
+            "  h              history            S  (inside) save to file",
             "  Esc            C (clear entry)   Delete  AC (all clear)",
             "  Backspace      DEL               Ctrl-L  redraw",
             "  arrows + Enter operate every button; mouse clicks work too",
             "",
             "  ?  close help          q / Ctrl-C  quit",
         ];
-        let n = LINES.len() as i32;
-        let top = ((self.lines - n - 2) / 2 + 1).max(1);
-        let left = ((self.cols - 70) / 2 + 1).max(1);
-
-        for (i, line) in LINES.iter().enumerate() {
-            if top + i as i32 > self.lines {
-                break;
-            }
-            self.at(top + i as i32, left);
-            self.style(
-                theme,
-                if i == 0 { StyleId::HelpTitle } else { StyleId::HelpText },
-                StyleState::Normal,
-            );
-            self.os(line);
-            self.style_off();
-        }
+        let (top, left, n) = self.draw_overlay(theme, LINES);
 
         self.at(top + n + 1, left);
         self.style(theme, StyleId::Hint, StyleState::Normal);
         let s = format!("  theme: {}", theme.name());
         self.os(&s);
         self.style_off();
+    }
+
+    fn draw_about(&mut self, theme: &Theme) {
+        let version = format!("  version {}", crate::GBCALC_VERSION);
+        let lines: [&str; 12] = [
+            "gbcalc -- about",
+            "",
+            "  A TUI scientific calculator: display on top, functions in",
+            "  the middle, number entry at the bottom -- the function set",
+            "  of xcalc, plus decimal / hexadecimal / binary modes.",
+            "",
+            "  One memory register and a saveable calculation history.",
+            "",
+            version.as_str(),
+            "  by Guy Bruneau",
+            "",
+            "  any key  close about          q / Ctrl-C  quit",
+        ];
+        self.draw_overlay(theme, &lines);
+    }
+
+    fn draw_history(&mut self, calc: &Calc, theme: &Theme) {
+        let mut lines: Vec<String> = vec!["gbcalc history".to_string(), String::new()];
+
+        if calc.history.is_empty() {
+            lines.push("  (empty -- results appear here after '=')".to_string());
+        } else {
+            // Budget rows for title/blank/blank/hint/status, then show the
+            // most recent entries that fit, oldest of those first.
+            let budget = (self.lines - 6).max(1) as usize;
+            let start = calc.history.len().saturating_sub(budget);
+            for entry in &calc.history[start..] {
+                lines.push(format!("  {entry}"));
+            }
+        }
+        lines.push(String::new());
+        lines.push("  S  save to file          any other key  close history".to_string());
+
+        let refs: Vec<&str> = lines.iter().map(String::as_str).collect();
+        let (top, left, n) = self.draw_overlay(theme, &refs);
+
+        if let Some(msg) = self.hist_msg.clone() {
+            self.at(top + n + 1, left);
+            self.style(theme, StyleId::Hint, StyleState::Normal);
+            let s = format!("  {msg}");
+            self.os(&s);
+            self.style_off();
+        }
     }
 
     fn render(&mut self, calc: &Calc, theme: &Theme) {
@@ -814,16 +888,21 @@ impl Ui {
             self.os(&s);
             self.at(2, 1);
             self.os("resize the window, or press q to quit");
-        } else if self.help {
-            self.draw_help(theme);
         } else {
-            self.draw_frame(calc, theme);
-            for r in 0..NROWS {
-                for i in 0..rows()[r].len() {
-                    self.draw_btn(calc, theme, r, i);
+            match self.overlay {
+                Overlay::Help => self.draw_help(theme),
+                Overlay::About => self.draw_about(theme),
+                Overlay::History => self.draw_history(calc, theme),
+                Overlay::None => {
+                    self.draw_frame(calc, theme);
+                    for r in 0..NROWS {
+                        for i in 0..rows()[r].len() {
+                            self.draw_btn(calc, theme, r, i);
+                        }
+                    }
+                    self.draw_hint(theme);
                 }
             }
-            self.draw_hint(theme);
         }
 
         self.at(self.lines, self.cols);
@@ -914,6 +993,23 @@ fn find_key(calc: &Calc, ch: i32) -> Option<&'static Btn> {
     None
 }
 
+/// Write the calculation history to `$XDG_CONFIG_HOME/gbcalc/history.txt`
+/// (or `~/.config/gbcalc/history.txt`), overwriting any previous save.
+/// Returns the path written to.
+fn save_history(calc: &Calc) -> Result<String, String> {
+    let dir = crate::theme::config_dir()
+        .ok_or_else(|| "no HOME or XDG_CONFIG_HOME set".to_string())?;
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+
+    let path = format!("{dir}/history.txt");
+    let mut body = calc.history.join("\n");
+    if !body.is_empty() {
+        body.push('\n');
+    }
+    std::fs::write(&path, body).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
 // ----------------------------------------------------------------- run
 
 /// Runs the interactive calculator until the user quits. Returns an exit
@@ -977,8 +1073,9 @@ pub fn run(theme: &Theme) -> i32 {
                 continue;
             }
             KEY_MOUSE => {
-                if ui.help {
-                    ui.help = false;
+                if ui.overlay != Overlay::None {
+                    ui.overlay = Overlay::None;
+                    ui.hist_msg = None;
                 } else if let Some((r, i)) = ui.hit_test(ui.input.mx, ui.input.my) {
                     ui.fr = r;
                     ui.fc = i;
@@ -989,12 +1086,19 @@ pub fn run(theme: &Theme) -> i32 {
             _ => {}
         }
 
-        if ui.help {
-            // Any key closes help, except quit which still quits.
+        if ui.overlay != Overlay::None {
+            // Any key closes an overlay, except quit which still quits;
+            // inside history, S saves it to a file without closing.
             if key == 'q' as i32 || key == 3 {
                 quit = true;
+            } else if ui.overlay == Overlay::History && key == 'S' as i32 {
+                ui.hist_msg = Some(match save_history(&calc) {
+                    Ok(path) => format!("saved to {path}"),
+                    Err(e) => format!("save failed: {e}"),
+                });
             } else {
-                ui.help = false;
+                ui.overlay = Overlay::None;
+                ui.hist_msg = None;
             }
             continue;
         }
@@ -1005,7 +1109,16 @@ pub fn run(theme: &Theme) -> i32 {
                 continue;
             }
             k if k == '?' as i32 => {
-                ui.help = true;
+                ui.overlay = Overlay::Help;
+                continue;
+            }
+            k if k == 'I' as i32 => {
+                ui.overlay = Overlay::About;
+                continue;
+            }
+            k if k == 'h' as i32 => {
+                ui.overlay = Overlay::History;
+                ui.hist_msg = None;
                 continue;
             }
             12 => {
