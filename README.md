@@ -1,7 +1,7 @@
 # gbcalc
 
-A TUI scientific calculator written in C — the function set of `xcalc`, plus
-decimal / hexadecimal / binary modes, in a terminal.
+A TUI scientific calculator written in Rust — the function set of `xcalc`,
+plus decimal / hexadecimal / binary modes, in a terminal.
 
 ```
 ╭─ gbcalc ──────────────────────────────────────────────────────────────╮
@@ -29,13 +29,13 @@ Display on top, functions in the middle, number entry at the bottom.
 
 ## Build
 
-No dependencies beyond a C99 compiler and libm — no ncurses.
+No dependencies beyond `libc` (for raw termios/ioctl/signal handling) — no
+ncurses.
 
 ```sh
-make            # build ./gbcalc
-make test       # run the engine unit tests
-make run        # build and launch
-make install    # optional, PREFIX=/usr/local
+cargo build --release   # build ./target/release/gbcalc
+cargo test              # run the engine and theme unit tests
+cargo run --release     # build and launch
 ```
 
 Needs a terminal of at least 74x20. It tells you and recovers on resize if
@@ -103,12 +103,15 @@ are rounded to exact values.
 
 ## Layout
 
-- `src/calc.[ch]` — the engine: entry state machine, precedence stack,
-  functions, bases, memory, formatting. No I/O, so it is unit-testable.
-- `src/ui.c` — terminal handling and drawing: raw mode via `termios`,
-  output via ANSI escape sequences, a single button table that drives
-  rendering, keyboard shortcuts, focus navigation and mouse hit-testing.
-- `src/main.c` — argument parsing.
-- `tests/test_calc.c` — engine tests, no terminal required.
+- `src/calc.rs` — the engine: entry state machine, precedence stack,
+  functions, bases, memory, formatting. No I/O, so it is unit-testable
+  (`cargo test`).
+- `src/theme.rs` — theme file parsing and SGR (ANSI colour code) generation,
+  also unit-tested.
+- `src/ui.rs` — terminal handling and drawing: raw mode via `termios`
+  (via `libc`), output via ANSI escape sequences, a single button table that
+  drives rendering, keyboard shortcuts, focus navigation and mouse
+  hit-testing.
+- `src/main.rs` — argument parsing.
 
 `--no-color` (or `NO_COLOR` in the environment) disables colour.

@@ -1,6 +1,6 @@
 # Project description
 
-a TUI scientifica calculator written in c
+a TUI scientifica calculator written in Rust
 
 # functions
 

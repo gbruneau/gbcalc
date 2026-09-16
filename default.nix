@@ -4,32 +4,27 @@
 #   nix-env -f . -i      install it into the user profile
 #
 
-{ stdenv, lib, makeWrapper }:
+{ rustPlatform, lib }:
 
-stdenv.mkDerivation {
+rustPlatform.buildRustPackage {
   pname = "gbcalc";
   version = "0.1.0"; # adjust or use a git-based version if you like
 
   src = ./.;
 
-  # If you have a Makefile with a default target that builds `gbcalc`:
-  buildPhase = ''
-    runHook preBuild
-    make
-    runHook postBuild
-  '';
+  cargoLock.lockFile = ./Cargo.lock;
 
-  installPhase = ''
-    runHook preInstall
+  # Baked in at compile time, read back by src/theme.rs via option_env!, so
+  # the installed binary finds its themes without needing a wrapper script.
+  GBCALC_THEMEDIR = "${placeholder "out"}/share/gbcalc/themes";
 
-    mkdir -p $out/bin
-    install -m755 gbcalc $out/bin/gbcalc
-
-    runHook postInstall
+  postInstall = ''
+    install -d $out/share/gbcalc/themes
+    install -m644 themes/*.conf $out/share/gbcalc/themes/
   '';
 
   meta = {
-    description = "gbcalc – your C calculator tool";
+    description = "gbcalc – a TUI scientific calculator";
     license = lib.licenses.mit; # or whatever license you use
     platforms = lib.platforms.linux;
   };
