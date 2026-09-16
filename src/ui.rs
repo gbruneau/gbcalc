@@ -962,6 +962,18 @@ fn press(calc: &mut Calc, b: &Btn) {
 }
 
 /// Find the button bound to `ch`, honouring base-dependent bindings.
+/// Is `ch` bound to some non-hexdigit button (case-sensitive)?
+fn key_bound_elsewhere(ch: u8) -> bool {
+    for row in rows() {
+        for b in row {
+            if !b.hexdigit_only && !b.keys.is_empty() && b.keys.bytes().any(|k| k == ch) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn find_key(calc: &Calc, ch: i32) -> Option<&'static Btn> {
     if !(0..=0xff).contains(&ch) {
         return None;
@@ -969,14 +981,15 @@ fn find_key(calc: &Calc, ch: i32) -> Option<&'static Btn> {
     let ch = ch as u8;
 
     // In HEX mode the letters a-f are digits and outrank function keys.
+    // Uppercase A-F do too, unless that exact letter is also a function key
+    // (D DEC, B BIN, A ANS) -- otherwise the base could never be switched
+    // back by keyboard once HEX is entered.
     if calc.base == Base::Hex {
-        let hexdigit = match ch {
-            b'a'..=b'f' => Some(ch - b'a' + 10),
-            b'A'..=b'F' => Some(ch - b'A' + 10),
-            _ => None,
-        };
-        if let Some(d) = hexdigit {
-            return Some(&ROW_N0[(d - 10) as usize]);
+        if (b'a'..=b'f').contains(&ch) {
+            return Some(&ROW_N0[(ch - b'a') as usize]);
+        }
+        if (b'A'..=b'F').contains(&ch) && !key_bound_elsewhere(ch) {
+            return Some(&ROW_N0[(ch - b'A') as usize]);
         }
     }
 
